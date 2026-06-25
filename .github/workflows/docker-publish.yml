@@ -41,17 +41,22 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Read Manager.io version from Dockerfile
+      - name: Resolve latest upstream Manager.io version
         id: version
         run: |
           set -euo pipefail
-          VERSION=$(awk -F= '/^ARG MANAGER_VERSION=/{print $2; exit}' Dockerfile)
+          TAG=$(curl -fsSL https://api.github.com/repos/Manager-io/Manager/releases/latest | jq -r .tag_name)
+          if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+            echo "::error::Failed to determine latest upstream Manager.io release tag."
+            exit 1
+          fi
+          VERSION="${TAG#v}"
           if [ -z "$VERSION" ]; then
-            echo "::error::MANAGER_VERSION not found in Dockerfile"
+            echo "::error::Resolved upstream version is empty."
             exit 1
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "MANAGER_VERSION=$VERSION"
+          echo "Resolved MANAGER_VERSION=$VERSION"
 
       - name: Build and push
         uses: docker/build-push-action@v6
