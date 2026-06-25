@@ -1,0 +1,134 @@
+name: Upstream release build
+
+on:
+  # Run every 6 hours to detect new Manager.io releases.
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Upstream Manager.io release tag (e.g. 26.6.17.3647 or v26.6.17.3647).
+          Leave empty to fetch the latest upstream release.
+        required: false
+        type: string
+        default: ""
+      force:
+        description: "Rebuild and overwrite image tags even if they already exist."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+  DOCKERHUB_IMAGE: docker.io/cub4no/managerio-docker
+
+jobs:
+  build:
+    name: Detect upstream release and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream Manager.io version
+        id: version
+        run: |
+          set -euo pipefail
+          if [ -n '${{ inputs.version }}' ]; then
+            VERSION='${{ inputs.version }}'
+            echo "Using version supplied via workflow_dispatch: $VERSION"
+          else
+            echo "Fetching latest upstream Manager.io release from GitHub API..."
+            TAG=$(curl -fsSL https://api.github.com/repos/Manager-io/Manager/releases/latest | jq -r .tag_name)
+            if [ -z "$TAG" ] || [ "$TAG" = "null" ]; then
+              echo "::error::Failed to determine latest upstream Manager.io release tag."
+              exit 1
+            fi
+            VERSION="$TAG"
+            echo "Latest upstream release tag: $VERSION"
+          fi
+          # Strip a leading 'v' so the value matches the MANAGER_VERSION used in the Dockerfile
+          # and produces a clean Docker tag.
+          VERSION="${VERSION#v}"
+          if [ -z "$VERSION" ]; then
+            echo "::error::Resolved upstream version is empty."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved MANAGER_VERSION=$VERSION"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Check whether the image tag already exists
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          TARGET="${{ env.IMAGE }}:${VERSION}"
+          if [ "$FORCE" = "true" ]; then
+            echo "force=true requested; will rebuild ${TARGET} regardless of existence."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if docker buildx imagetools inspect "${TARGET}" >/dev/null 2>&1; then
+            echo "Image ${TARGET} already exists on GHCR. Nothing to do."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image ${TARGET} not found on GHCR; will build and push."
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push images
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.IMAGE }}:latest
+            ${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.DOCKERHUB_IMAGE }}:latest
+          build-args: |
+            MANAGER_VERSION=${{ steps.version.outputs.version }}
+          labels: |
+            org.opencontainers.image.title=managerio-docker
+            org.opencontainers.image.description=Docker image for Manager.io Server (accounting software for small business)
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.licenses=GPL-3.0-only
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Result summary
+        if: always()
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
+            echo "::notice::Skipped: ${{ env.IMAGE }}:${VERSION} already exists. Re-run with force=true to rebuild and push both registries."
+          else
+            echo "::notice::Published ${{ env.IMAGE }}:${VERSION}, ${{ env.DOCKERHUB_IMAGE }}:${VERSION}, and updated latest tags."
+          fi

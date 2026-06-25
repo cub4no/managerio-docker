@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+.gitattributes
+
+# GitHub metadata
+.github
+
+# Data, logs and runtime artifacts (kept on host, not in image)
+data
+logs
+temp
+*.log
+
+# Documentation (kept in repo but not needed in the image)
+README.md
+*.md
+
+# Editor / OS noise
+.idea
+.vscode
+.DS_Store
+Thumbs.db
+
+# CI / build outputs
+docker-compose*.yml
+.dockerignore
+
+# Do NOT exclude:
+#   Dockerfile
+#   LICENSE

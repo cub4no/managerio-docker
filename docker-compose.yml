@@ -1,0 +1,10 @@
+services:
+  manager:
+    image: ghcr.io/cub4no/managerio-docker:latest
+    build: .
+    container_name: Manager
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data:/data
+    restart: unless-stopped
