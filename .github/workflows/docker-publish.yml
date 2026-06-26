@@ -4,26 +4,34 @@ on:
   push:
     branches:
       - main
-    tags:
-      - "v*"
+    paths:
+      - ".github/workflows/docker-publish.yml"
+      - ".github/actions/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker-compose.yml"
+      - "docker/**"
+      - "scripts/**"
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
   packages: write
 
 env:
-  IMAGE_NAME: ${{ github.repository }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE: docker.io/cub4no/managerio-docker
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -58,7 +66,7 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved MANAGER_VERSION=$VERSION"
 
-      - name: Build and push
+      - name: Build and push images
         uses: docker/build-push-action@v7
         with:
           context: .
@@ -66,8 +74,8 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ghcr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-            ghcr.io/${{ env.IMAGE_NAME }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.GHCR_IMAGE }}:latest
             ${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_IMAGE }}:latest
           build-args: |
@@ -77,7 +85,8 @@ jobs:
             org.opencontainers.image.description=Docker image for Manager.io Server (accounting software for small business)
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.licenses=GPL-3.0-only
+            org.opencontainers.image.url=https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=managerio-docker
+          cache-to: type=gha,scope=managerio-docker,mode=max

@@ -19,22 +19,24 @@ on:
         type: boolean
         default: false
 
+concurrency:
+  group: upstream-release-build
+  cancel-in-progress: false
+
 permissions:
   contents: read
   packages: write
 
 env:
-  IMAGE: ghcr.io/${{ github.repository }}
+  GHCR_IMAGE: ghcr.io/${{ github.repository }}
   DOCKERHUB_IMAGE: docker.io/cub4no/managerio-docker
 
 jobs:
   build:
     name: Detect upstream release and publish
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v7
-
       - name: Resolve upstream Manager.io version
         id: version
         run: |
@@ -62,9 +64,6 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Resolved MANAGER_VERSION=$VERSION"
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
       - name: Log in to GHCR
         uses: docker/login-action@v4
         with:
@@ -72,32 +71,54 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v4
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Check whether the image tag already exists
+      - name: Check whether image tags already exist
         id: check
         env:
           FORCE: ${{ inputs.force }}
         run: |
           set -euo pipefail
           VERSION="${{ steps.version.outputs.version }}"
-          TARGET="${{ env.IMAGE }}:${VERSION}"
+          GHCR_TARGET="${{ env.GHCR_IMAGE }}:${VERSION}"
+          DOCKERHUB_TARGET="${{ env.DOCKERHUB_IMAGE }}:${VERSION}"
           if [ "$FORCE" = "true" ]; then
-            echo "force=true requested; will rebuild ${TARGET} regardless of existence."
+            echo "force=true requested; will rebuild ${GHCR_TARGET} and ${DOCKERHUB_TARGET} regardless of existence."
             echo "exists=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if docker buildx imagetools inspect "${TARGET}" >/dev/null 2>&1; then
-            echo "Image ${TARGET} already exists on GHCR. Nothing to do."
+
+          GHCR_EXISTS=false
+          DOCKERHUB_EXISTS=false
+          if docker manifest inspect "${GHCR_TARGET}" >/dev/null 2>&1; then
+            GHCR_EXISTS=true
+          fi
+          if docker manifest inspect "${DOCKERHUB_TARGET}" >/dev/null 2>&1; then
+            DOCKERHUB_EXISTS=true
+          fi
+
+          if [ "$GHCR_EXISTS" = "true" ] && [ "$DOCKERHUB_EXISTS" = "true" ]; then
+            echo "Images ${GHCR_TARGET} and ${DOCKERHUB_TARGET} already exist. Nothing to do."
             echo "exists=true" >> "$GITHUB_OUTPUT"
           else
-            echo "Image ${TARGET} not found on GHCR; will build and push."
+            echo "At least one registry is missing version ${VERSION}; will build and push."
+            echo "GHCR exists: ${GHCR_EXISTS}"
+            echo "Docker Hub exists: ${DOCKERHUB_EXISTS}"
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Checkout repository
+        if: steps.check.outputs.exists == 'false'
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Docker Hub
+        if: steps.check.outputs.exists == 'false'
+        uses: docker/login-action@v4
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Build and push images
         if: steps.check.outputs.exists == 'false'
@@ -108,8 +129,8 @@ jobs:
           provenance: false
           sbom: false
           tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}
-            ${{ env.IMAGE }}:latest
+            ${{ env.GHCR_IMAGE }}:${{ steps.version.outputs.version }}
+            ${{ env.GHCR_IMAGE }}:latest
             ${{ env.DOCKERHUB_IMAGE }}:${{ steps.version.outputs.version }}
             ${{ env.DOCKERHUB_IMAGE }}:latest
           build-args: |
@@ -122,15 +143,17 @@ jobs:
             org.opencontainers.image.url=https://github.com/${{ github.repository }}/pkgs/container/${{ github.event.repository.name }}
             org.opencontainers.image.version=${{ steps.version.outputs.version }}
             org.opencontainers.image.revision=${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=managerio-docker
+          cache-to: type=gha,scope=managerio-docker,mode=max
 
-      - name: Result summary
-        if: always()
+      - name: Skipped summary
+        if: steps.check.outputs.exists == 'true'
         run: |
           VERSION="${{ steps.version.outputs.version }}"
-          if [ "${{ steps.check.outputs.exists }}" = "true" ]; then
-            echo "::notice::Skipped: ${{ env.IMAGE }}:${VERSION} already exists. Re-run with force=true to rebuild and push both registries."
-          else
-            echo "::notice::Published ${{ env.IMAGE }}:${VERSION}, ${{ env.DOCKERHUB_IMAGE }}:${VERSION}, and updated latest tags."
-          fi
+          echo "::notice::Skipped: ${{ env.GHCR_IMAGE }}:${VERSION} and ${{ env.DOCKERHUB_IMAGE }}:${VERSION} already exist. Re-run with force=true to rebuild and push both registries."
+
+      - name: Published summary
+        if: steps.check.outputs.exists == 'false' && success()
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "::notice::Published ${{ env.GHCR_IMAGE }}:${VERSION}, ${{ env.DOCKERHUB_IMAGE }}:${VERSION}, and updated latest tags."
